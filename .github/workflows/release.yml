@@ -1,0 +1,105 @@
+name: Build and upload `supertd`
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.target.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - os: "ubuntu-latest"
+            triple: "x86_64-unknown-linux-gnu"
+          - os: "ubuntu-latest"
+            triple: "aarch64-unknown-linux-gnu"
+            cross: true
+          - os: "macos-latest"
+            triple: "x86_64-apple-darwin"
+          - os: "macos-latest"
+            triple: "aarch64-apple-darwin"
+          - os: "windows-latest"
+            triple: "x86_64-pc-windows-msvc"
+            is_windows: true
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: SebRollen/toml-action@v1.0.2
+        id: read_rust_toolchain
+        with:
+          file: "rust-toolchain"
+          field: "toolchain.channel"
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.read_rust_toolchain.outputs.value }}
+          targets: ${{ matrix.target.triple }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: supertd-release
+          key: ${{ matrix.target.triple }}
+      - uses: actions-rs/install@v0.1
+        if: matrix.target.cross
+        with:
+          crate: cross
+          version: latest
+      - name: Set variables
+        id: set_variables
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target.is_windows }}" ]; then
+            echo "supertd_out=target/${{ matrix.target.triple }}/release/supertd.exe" >> "$GITHUB_OUTPUT"
+            echo "supertd_zst=artifacts/supertd-${{ matrix.target.triple }}.exe.zst" >> "$GITHUB_OUTPUT"
+          else
+            echo "supertd_out=target/${{ matrix.target.triple }}/release/supertd" >> "$GITHUB_OUTPUT"
+            echo "supertd_zst=artifacts/supertd-${{ matrix.target.triple }}.zst" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: "-C strip=debuginfo -C codegen-units=1"
+        run: |
+          if [ -n "${{ matrix.target.cross }}" ]; then
+            CARGO=cross
+          else
+            CARGO=cargo
+          fi
+
+          $CARGO build --release --bin supertd --target ${{ matrix.target.triple }}
+      - name: Compress binary
+        shell: bash
+        run: |
+          mkdir artifacts
+          zstd -z ${{ steps.set_variables.outputs.supertd_out }} -o ${{ steps.set_variables.outputs.supertd_zst }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: supertd-${{ matrix.target.triple }}
+          path: artifacts/
+
+  release_latest:
+    name: Update `latest` release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish `latest` release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest
+          body: |
+            Rolling release built from `main` (${{ github.sha }}).
+          files: artifacts/*
+          prerelease: true
+          make_latest: false
